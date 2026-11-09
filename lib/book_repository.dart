@@ -6,6 +6,8 @@ import 'package:http/http.dart' as http;
 
 import 'book.dart';
 
+enum BookSearchType { keyword, title, author, isbn }
+
 class BookSearchPage {
   const BookSearchPage({
     required this.books,
@@ -35,6 +37,7 @@ class BookRepository {
     String query, {
     int limit = 12,
     int page = 1,
+    BookSearchType type = BookSearchType.keyword,
   }) {
     final normalized = query.trim();
     if (normalized.isEmpty) {
@@ -43,7 +46,8 @@ class BookRepository {
 
     final boundedLimit = limit.clamp(1, 30);
     final boundedPage = page.clamp(1, 100000);
-    final cacheKey = '${normalized.toLowerCase()}|$boundedLimit|$boundedPage';
+    final cacheKey =
+        '${type.name}|${normalized.toLowerCase()}|$boundedLimit|$boundedPage';
     final cached = _cache[cacheKey];
     if (cached != null &&
         DateTime.now().difference(cached.createdAt) < _cacheDuration) {
@@ -56,6 +60,7 @@ class BookRepository {
       normalized,
       limit: boundedLimit,
       page: boundedPage,
+      type: type,
     );
     _inFlight[cacheKey] = request;
     return request.whenComplete(() => _inFlight.remove(cacheKey));
@@ -65,10 +70,17 @@ class BookRepository {
     String query, {
     required int limit,
     required int page,
+    required BookSearchType type,
   }) async {
     final results = await Future.wait([
-      _trySource('Open Library', () => _searchOpenLibrary(query, limit, page)),
-      _trySource('Google Books', () => _searchGoogleBooks(query, limit, page)),
+      _trySource(
+        'Open Library',
+        () => _searchOpenLibrary(query, limit, page, type),
+      ),
+      _trySource(
+        'Google Books',
+        () => _searchGoogleBooks(query, limit, page, type),
+      ),
       _trySource('Project Gutenberg', () => _searchGutendex(query, page)),
       _trySource(
         'Internet Archive',
@@ -92,7 +104,7 @@ class BookRepository {
       hasMore: successfulSources.any((result) => result.hasMore),
       sourceWarnings: warnings,
     );
-    _cache['${query.toLowerCase()}|$limit|$page'] =
+    _cache['${type.name}|${query.toLowerCase()}|$limit|$page'] =
         _CachedPage(DateTime.now(), pageResult);
     return pageResult;
   }
@@ -116,16 +128,27 @@ class BookRepository {
     String query,
     int limit,
     int page,
+    BookSearchType type,
   ) async {
+    final parameters = <String, String>{
+      'limit': '$limit',
+      'page': '$page',
+      'fields': 'key,title,author_name,author_key,cover_i,first_publish_year,'
+          'edition_count,isbn,publisher,language,subject,ebook_access,'
+          'public_scan_b,ia',
+    };
+    switch (type) {
+      case BookSearchType.keyword:
+        parameters['q'] = query;
+      case BookSearchType.title:
+        parameters['title'] = query;
+      case BookSearchType.author:
+        parameters['author'] = query;
+      case BookSearchType.isbn:
+        parameters['isbn'] = query.replaceAll(RegExp(r'[^0-9Xx]'), '');
+    }
     final response = await _getJson(
-      Uri.https('openlibrary.org', '/search.json', {
-        'q': query,
-        'limit': '$limit',
-        'page': '$page',
-        'fields':
-            'key,title,author_name,cover_i,first_publish_year,edition_count,'
-            'isbn,publisher,language,subject',
-      }),
+      Uri.https('openlibrary.org', '/search.json', parameters),
     );
     final docs = response['docs'];
     if (docs is! List) {
@@ -147,9 +170,17 @@ class BookRepository {
     String query,
     int limit,
     int page,
+    BookSearchType type,
   ) async {
+    final googleQuery = switch (type) {
+      BookSearchType.keyword => query,
+      BookSearchType.title => 'intitle:$query',
+      BookSearchType.author => 'inauthor:$query',
+      BookSearchType.isbn =>
+        'isbn:${query.replaceAll(RegExp(r'[^0-9Xx]'), '')}',
+    };
     final parameters = <String, String>{
-      'q': query,
+      'q': googleQuery,
       'maxResults': '$limit',
       'startIndex': '${(page - 1) * limit}',
       'orderBy': 'relevance',
@@ -291,6 +322,9 @@ class BookRepository {
   List<Book> mergePages(List<Book> existing, List<Book> incoming) =>
       _mergeDuplicates([...existing, ...incoming]);
 
+  String searchCacheKey(String query, BookSearchType type) =>
+      '${type.name}|${query.trim().toLowerCase()}';
+
   Future<String> getPlainText(Book book) async {
     final url = book.plainTextUrl;
     final uri = url == null ? null : Uri.tryParse(url);
@@ -406,10 +440,13 @@ class BookRepository {
   }
 
   bool _sameBook(Book first, Book second) {
-    if (first.isbn != null &&
-        second.isbn != null &&
-        _normalizeIsbn(first.isbn!) == _normalizeIsbn(second.isbn!)) {
-      return true;
+    final firstIsbn = _normalizeIsbn(first.isbn ?? '');
+    final secondIsbn = _normalizeIsbn(second.isbn ?? '');
+    if (firstIsbn.isNotEmpty && secondIsbn.isNotEmpty) {
+      return firstIsbn == secondIsbn;
+    }
+    for (final entry in first.sourceBookIds.entries) {
+      if (second.sourceBookIds[entry.key] == entry.value) return true;
     }
     final firstTitle = _normalize(first.title);
     final secondTitle = _normalize(second.title);
@@ -452,6 +489,25 @@ class BookRepository {
       publicationDate: preferred.publicationDate ?? other.publicationDate,
       pageCount: preferred.pageCount ?? other.pageCount,
       readingFormat: preferred.readingFormat ?? other.readingFormat,
+      averageRating: preferred.averageRating ?? other.averageRating,
+      ratingsCount: preferred.ratingsCount ?? other.ratingsCount,
+      downloadCount: preferred.downloadCount ?? other.downloadCount,
+      authorIdentifiers: {
+        ...other.authorIdentifiers,
+        ...preferred.authorIdentifiers,
+      },
+      sourceBookIds: {
+        ...other.sourceBookIds,
+        ...preferred.sourceBookIds,
+      },
+      availableFormats: {
+        ...preferred.availableFormats,
+        ...other.availableFormats,
+      }.toList(),
+      readingUrl: preferred.readingUrl ?? other.readingUrl,
+      readingAvailability:
+          preferred.readingAvailability ?? other.readingAvailability,
+      borrowUrl: preferred.borrowUrl ?? other.borrowUrl,
     );
   }
 

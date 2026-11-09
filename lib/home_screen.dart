@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import 'app_provider.dart';
 import 'book.dart';
 import 'book_card.dart';
+import 'book_repository.dart';
 import 'ebook_readers.dart';
 import 'reader_screen.dart';
 
@@ -13,6 +14,13 @@ class HomeScreen extends StatefulWidget {
   @override
   State<HomeScreen> createState() => _HomeScreenState();
 }
+
+String _searchTypeLabel(BookSearchType type) => switch (type) {
+      BookSearchType.keyword => 'keywords',
+      BookSearchType.title => 'title',
+      BookSearchType.author => 'author',
+      BookSearchType.isbn => 'ISBN',
+    };
 
 class _HomeScreenState extends State<HomeScreen> {
   int _selectedIndex = 0;
@@ -256,27 +264,56 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
               ),
               const SizedBox(height: 16),
-              TextField(
-                controller: _searchController,
-                textInputAction: TextInputAction.search,
-                onChanged: app.search,
-                onSubmitted: (value) => app.search(value, immediate: true),
-                decoration: InputDecoration(
-                  hintText: 'Search titles, authors, or topics',
-                  prefixIcon: const Icon(Icons.search_rounded),
-                  suffixIcon: _searchController.text.isEmpty
-                      ? null
-                      : IconButton(
-                          tooltip: 'Clear search',
-                          onPressed: () {
-                            _searchController.clear();
-                            app.search('');
-                            setState(() {});
-                          },
-                          icon: const Icon(Icons.close_rounded),
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: _searchController,
+                        textInputAction: TextInputAction.search,
+                        onChanged: (value) => app.search(value),
+                        onSubmitted: (value) =>
+                            app.search(value, immediate: true),
+                        decoration: InputDecoration(
+                          hintText: 'Search ${_searchTypeLabel(app.searchType)}',
+                          prefixIcon: const Icon(Icons.search_rounded),
+                          suffixIcon: _searchController.text.isEmpty
+                              ? null
+                              : IconButton(
+                                  tooltip: 'Clear search',
+                                  onPressed: () {
+                                    _searchController.clear();
+                                    app.search('');
+                                    setState(() {});
+                                  },
+                                  icon: const Icon(Icons.close_rounded),
+                                ),
                         ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    DropdownButtonHideUnderline(
+                      child: DropdownButton<BookSearchType>(
+                        value: app.searchType,
+                        items: [
+                          for (final type in BookSearchType.values)
+                            DropdownMenuItem(
+                              value: type,
+                              child: Text(_searchTypeLabel(type)),
+                            ),
+                        ],
+                        onChanged: (type) {
+                          if (type != null) {
+                            app.search(
+                              _searchController.text,
+                              type: type,
+                              immediate: true,
+                            );
+                          }
+                        },
+                      ),
+                    ),
+                  ],
                 ),
-              ),
               const SizedBox(height: 14),
               Row(
                 children: [

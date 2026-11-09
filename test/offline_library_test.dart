@@ -134,6 +134,55 @@ void main() {
     }
   });
 
+  test('shows persisted search results when all catalogs are unavailable',
+      () async {
+    SharedPreferences.setMockInitialValues({});
+    final directory = await Directory.systemTemp.createTemp();
+    final database = LocalLibraryDatabase(
+      factory: databaseFactoryFfi,
+      databasePath: () async => directory.path,
+    );
+    const cachedBook = Book(
+      key: 'openlibrary:/works/OL123W',
+      source: 'Open Library',
+      title: 'Cached Example',
+      authors: ['Example Author'],
+    );
+    await database.cacheSearchPage(
+      'keyword|example',
+      1,
+      [cachedBook],
+    );
+    final repository = BookRepository(
+      client: MockClient((_) async => http.Response('unavailable', 503)),
+    );
+    final storage = LocalBookStorage(
+      client: MockClient((_) async => http.Response('', 500)),
+      documentsDirectory: () async => directory,
+    );
+    final provider = AppProvider(
+      database: database,
+      repository: repository,
+      bookStorage: storage,
+    );
+
+    try {
+      await provider.initialize();
+      await provider.search('example', immediate: true);
+
+      expect(provider.results.map((item) => item.key), [cachedBook.key]);
+      expect(provider.error, isNull);
+      expect(
+        provider.sourceWarnings.single,
+        contains('showing locally cached results'),
+      );
+    } finally {
+      await database.close();
+      provider.dispose();
+      await directory.delete(recursive: true);
+    }
+  });
+
   test('stores only verified authorized PDF and EPUB files', () async {
     final directory = await Directory.systemTemp.createTemp();
     final storage = LocalBookStorage(

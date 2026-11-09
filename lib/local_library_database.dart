@@ -14,7 +14,7 @@ class LocalLibraryDatabase {
   })  : _factory = factory ?? sqflite.databaseFactory,
         _databasePath = databasePath ?? sqflite.getDatabasesPath;
 
-  static const _version = 2;
+  static const _version = 3;
 
   final DatabaseFactory _factory;
   final Future<String> Function() _databasePath;
@@ -127,6 +127,16 @@ class LocalLibraryDatabase {
         preference_value TEXT NOT NULL
       )
     ''');
+    await database.execute('''
+      CREATE TABLE search_cache (
+        query_key TEXT NOT NULL,
+        page INTEGER NOT NULL,
+        book_id TEXT NOT NULL REFERENCES books(book_id) ON DELETE CASCADE,
+        position INTEGER NOT NULL,
+        cached_at TEXT NOT NULL,
+        PRIMARY KEY (query_key, page, book_id)
+      )
+    ''');
     await database.execute(
       'CREATE INDEX idx_bookmarks_book_id ON bookmarks(book_id)',
     );
@@ -138,6 +148,9 @@ class LocalLibraryDatabase {
     );
     await database.execute(
       'CREATE INDEX idx_notes_book_id ON notes(book_id)',
+    );
+    await database.execute(
+      'CREATE INDEX idx_search_cache_query ON search_cache(query_key, page)',
     );
   }
 
@@ -160,11 +173,26 @@ class LocalLibraryDatabase {
         'CREATE INDEX idx_notes_book_id ON notes(book_id)',
       );
     }
+    if (oldVersion < 3) {
+      await database.execute('''
+        CREATE TABLE search_cache (
+          query_key TEXT NOT NULL,
+          page INTEGER NOT NULL,
+          book_id TEXT NOT NULL REFERENCES books(book_id) ON DELETE CASCADE,
+          position INTEGER NOT NULL,
+          cached_at TEXT NOT NULL,
+          PRIMARY KEY (query_key, page, book_id)
+        )
+      ''');
+      await database.execute(
+        'CREATE INDEX idx_search_cache_query ON search_cache(query_key, page)',
+      );
+    }
   }
 
   Map<String, Object?> _bookValues(Book book) => {
         'book_id': book.key,
-        'external_id': book.key,
+        'external_id': jsonEncode(book.sourceBookIds),
         'isbn': book.isbn,
         'title': book.title,
         'authors': jsonEncode(book.authors),
@@ -213,6 +241,47 @@ class LocalLibraryDatabase {
         orderBy: 'last_read_at DESC',
       );
 
+  Future<void> cacheSearchPage(
+    String queryKey,
+    int page,
+    List<Book> books,
+  ) async {
+    final database = await _db;
+    await database.transaction((txn) async {
+      await txn.delete(
+        'search_cache',
+        where: 'query_key = ? AND page = ?',
+        whereArgs: [queryKey, page],
+      );
+      final timestamp = DateTime.now().toIso8601String();
+      for (var index = 0; index < books.length; index++) {
+        await _saveBook(txn, books[index]);
+        await txn.insert('search_cache', {
+          'query_key': queryKey,
+          'page': page,
+          'book_id': books[index].key,
+          'position': index,
+          'cached_at': timestamp,
+        });
+      }
+    });
+  }
+
+  Future<List<Book>> getCachedSearchPage(String queryKey, int page) async {
+    final database = await _db;
+    final rows = await database.rawQuery(
+      '''
+      SELECT b.metadata_json
+      FROM search_cache c
+      JOIN books b ON b.book_id = c.book_id
+      WHERE c.query_key = ? AND c.page = ?
+      ORDER BY c.position ASC
+      ''',
+      [queryKey, page],
+    );
+    return rows.map(_decodeBook).toList();
+  }
+
   Future<List<Book>> _getBooksFromCollection(
     String table, {
     required String orderBy,
@@ -251,7 +320,8 @@ class LocalLibraryDatabase {
           conflictAlgorithm: ConflictAlgorithm.ignore,
         );
       } else {
-        await txn.delete('favorites', where: 'book_id = ?', whereArgs: [book.key]);
+        await txn
+            .delete('favorites', where: 'book_id = ?', whereArgs: [book.key]);
       }
     });
   }
@@ -581,7 +651,8 @@ class LocalLibraryDatabase {
       await txn.update(
         'books',
         {
-          'download_status': remaining.isEmpty ? 'not_downloaded' : 'downloaded',
+          'download_status':
+              remaining.isEmpty ? 'not_downloaded' : 'downloaded',
           'local_file_path':
               remaining.isEmpty ? null : remaining.single['local_file_path'],
           'reading_format':

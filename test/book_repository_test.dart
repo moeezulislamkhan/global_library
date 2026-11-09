@@ -8,6 +8,26 @@ import 'package:http/testing.dart';
 
 void main() {
   group('Book data mapping', () {
+    test('maps Open Library identifiers and does not infer reading access', () {
+      final book = Book.fromOpenLibraryJson({
+        'key': '/works/OL123W',
+        'title': 'Example Title',
+        'author_name': ['Example Author'],
+        'author_key': ['OL456A'],
+        'isbn': ['9781234567890'],
+        'ebook_access': 'no_ebook',
+        'cover_i': 123,
+      });
+
+      expect(book.key, 'openlibrary:/works/OL123W');
+      expect(book.authorIdentifiers, {'Example Author': 'OL456A'});
+      expect(book.isbn, '9781234567890');
+      expect(book.coverUrl, contains('/123-L.jpg'));
+      expect(book.readingAvailability, 'catalog_only');
+      expect(book.canReadInApp, isFalse);
+      expect(book.epubUrl, isNull);
+    });
+
     test('maps Gutenberg public text and EPUB formats', () {
       final book = Book.fromGutendexJson({
         'id': 1342,
@@ -29,6 +49,21 @@ void main() {
       expect(book.plainTextUrl, contains('pg1342.txt'));
       expect(book.epubUrl, endsWith('.epub'));
       expect(book.canReadInApp, isTrue);
+    });
+
+    test('does not invent Gutenberg formats when the response omits them', () {
+      final book = Book.fromGutendexJson({
+        'id': 42,
+        'title': 'Catalog only',
+        'authors': [],
+        'formats': {'text/html': 'http://example.invalid/book.html'},
+      });
+
+      expect(book.availableFormats, isEmpty);
+      expect(book.plainTextUrl, isNull);
+      expect(book.epubUrl, isNull);
+      expect(book.pdfUrl, isNull);
+      expect(book.readingAvailability, 'metadata_only');
     });
 
     test('does not make restricted Archive files readable', () {
@@ -135,6 +170,7 @@ void main() {
       }
       return http.Response('unexpected request', 500);
     });
+
     final repository = BookRepository(client: client);
     addTearDown(repository.dispose);
 
@@ -144,6 +180,102 @@ void main() {
     expect(result.books.single.title, 'Example Title');
     expect(result.sourceWarnings, hasLength(1));
     expect(result.sourceWarnings.single, contains('Google Books'));
+  });
+
+  test('searches each catalog with the selected author query and page',
+      () async {
+    final requests = <Uri>[];
+    final client = MockClient((request) async {
+      requests.add(request.url);
+      if (request.url.host == 'openlibrary.org') {
+        return http.Response(
+          jsonEncode({
+            'numFound': 1,
+            'docs': [
+              {
+                'key': '/works/OL123W',
+                'title': 'Example Title',
+                'author_name': ['Example Author'],
+                'author_key': ['OL456A'],
+              },
+            ],
+          }),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      }
+      if (request.url.host == 'www.googleapis.com') {
+        return http.Response(
+          jsonEncode({
+            'totalItems': 1,
+            'items': [
+              {
+                'id': 'google-123',
+                'volumeInfo': {
+                  'title': 'Another Example',
+                  'authors': ['Example Author'],
+                },
+              },
+            ],
+          }),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      }
+      if (request.url.host == 'gutendex.com') {
+        return http.Response(
+          jsonEncode({
+            'count': 1,
+            'next': 'https://gutendex.com/books/?page=3',
+            'results': [
+              {
+                'id': 42,
+                'title': 'Public Domain Example',
+                'authors': [],
+                'formats': {},
+              },
+            ],
+          }),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      }
+      return http.Response(
+        jsonEncode({
+          'response': {'numFound': 0, 'docs': []}
+        }),
+        200,
+        headers: {'content-type': 'application/json'},
+      );
+    });
+    final repository = BookRepository(client: client);
+    addTearDown(repository.dispose);
+
+    final result = await repository.searchBooks(
+      'Example Author',
+      type: BookSearchType.author,
+      page: 2,
+    );
+
+    expect(result.books.map((book) => book.source), contains('Google Books'));
+    expect(result.books.map((book) => book.source), contains('Open Library'));
+    expect(
+      result.books.map((book) => book.source),
+      contains('Project Gutenberg'),
+    );
+    expect(result.hasMore, isTrue);
+    final openLibraryUri =
+        requests.singleWhere((uri) => uri.host == 'openlibrary.org');
+    final googleUri =
+        requests.singleWhere((uri) => uri.host == 'www.googleapis.com');
+    final gutendexUri =
+        requests.singleWhere((uri) => uri.host == 'gutendex.com');
+    expect(openLibraryUri.queryParameters['author'], 'Example Author');
+    expect(openLibraryUri.queryParameters['page'], '2');
+    expect(googleUri.queryParameters['q'], 'inauthor:Example Author');
+    expect(googleUri.queryParameters['startIndex'], '12');
+    expect(gutendexUri.queryParameters['search'], 'Example Author');
+    expect(gutendexUri.queryParameters['page'], '2');
   });
 
   test('merges duplicate source entries and preserves readable metadata',

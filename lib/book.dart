@@ -23,6 +23,15 @@ class Book {
     this.publicationDate,
     this.pageCount,
     this.readingFormat,
+    this.averageRating,
+    this.ratingsCount,
+    this.downloadCount,
+    this.authorIdentifiers = const {},
+    this.sourceBookIds = const {},
+    this.availableFormats = const [],
+    this.readingUrl,
+    this.readingAvailability,
+    this.borrowUrl,
   });
 
   final String key;
@@ -48,6 +57,15 @@ class Book {
   final String? publicationDate;
   final int? pageCount;
   final String? readingFormat;
+  final double? averageRating;
+  final int? ratingsCount;
+  final int? downloadCount;
+  final Map<String, String> authorIdentifiers;
+  final Map<String, String> sourceBookIds;
+  final List<String> availableFormats;
+  final String? readingUrl;
+  final String? readingAvailability;
+  final String? borrowUrl;
 
   String get authorLine =>
       authors.isEmpty ? 'Unknown author' : authors.join(', ');
@@ -56,7 +74,7 @@ class Book {
       coverImageUrl ??
       (coverId == null
           ? null
-          : 'https://covers.openlibrary.org/b/id/$coverId-M.jpg');
+          : 'https://covers.openlibrary.org/b/id/$coverId-L.jpg');
 
   bool get canReadInApp =>
       plainTextUrl != null || epubUrl != null || pdfUrl != null ||
@@ -93,6 +111,12 @@ class Book {
     final accessInfo = rawAccessInfo is Map<String, dynamic>
         ? rawAccessInfo
         : const <String, dynamic>{};
+    final epubInfo = accessInfo['epub'] is Map<String, dynamic>
+        ? accessInfo['epub'] as Map<String, dynamic>
+        : const <String, dynamic>{};
+    final pdfInfo = accessInfo['pdf'] is Map<String, dynamic>
+        ? accessInfo['pdf'] as Map<String, dynamic>
+        : const <String, dynamic>{};
     final rawPreviewUrl = accessInfo['webReaderLink'];
     final parsedPreviewUrl =
         rawPreviewUrl is String ? Uri.tryParse(rawPreviewUrl) : null;
@@ -118,6 +142,9 @@ class Book {
     return Book(
       key: json['id'] is String ? 'google:${json['id']}' : '',
       source: 'Google Books',
+      sourceBookIds: json['id'] is String
+          ? {'Google Books': json['id'] as String}
+          : const {},
       isbn: isbn,
       publisher: info['publisher'] as String?,
       language: info['language'] as String?,
@@ -138,6 +165,19 @@ class Book {
       firstPublishYear: year,
       publicationDate: rawPublishedDate is String ? rawPublishedDate : null,
       pageCount: info['pageCount'] is int ? info['pageCount'] as int : null,
+      averageRating: (info['averageRating'] as num?)?.toDouble(),
+      ratingsCount: info['ratingsCount'] as int?,
+      availableFormats: [
+        if (epubInfo['isAvailable'] == true) 'EPUB',
+        if (pdfInfo['isAvailable'] == true) 'PDF',
+      ],
+      readingUrl: previewUrl,
+      readingAvailability: switch (accessInfo['viewability']) {
+        'ALL_PAGES' => 'full_view',
+        'PARTIAL' => 'preview',
+        'NO_PAGES' => 'metadata_only',
+        _ => null,
+      },
     );
   }
 
@@ -151,6 +191,43 @@ class Book {
     final rawTitle = json['title'];
     final key = json['key'];
     final published = json['first_publish_year'];
+    final rawAvailability = json['availability'];
+    final availability = rawAvailability is Map<String, dynamic>
+        ? rawAvailability
+        : const <String, dynamic>{};
+    final ebookAccess = availability['ebook_access'] ?? json['ebook_access'];
+    final publicScan = availability['public_scan_b'] ?? json['public_scan_b'];
+    final isBorrowable = availability['is_borrowable'] ??
+        availability['is_lendable'] ??
+        json['is_borrowable'] ??
+        json['is_lendable'];
+    final authorKeys = json['author_key'];
+    final authors = rawAuthors is List
+        ? rawAuthors.whereType<String>().toList()
+        : const <String>[];
+    final keys =
+        authorKeys is List ? authorKeys.whereType<String>().toList() : <String>[];
+    final authorIds = <String, String>{
+      for (var index = 0;
+          index < keys.length && index < authors.length;
+          index++)
+        authors[index]: keys[index],
+    };
+    final keyValue = key is String ? key : null;
+    final coverId = cover is int ? cover : null;
+    final rawBorrowUrl = availability['borrow_url'] ?? json['borrow_url'];
+    final parsedBorrowUrl =
+        rawBorrowUrl is String ? Uri.tryParse(rawBorrowUrl) : null;
+    final borrowUrl = parsedBorrowUrl?.scheme == 'https' &&
+            (parsedBorrowUrl?.host == 'openlibrary.org' ||
+                parsedBorrowUrl?.host.endsWith('.openlibrary.org') == true)
+        ? rawBorrowUrl as String
+        : key is String &&
+                (isBorrowable == true ||
+                    isBorrowable == 'true' ||
+                    ebookAccess == 'borrowable')
+            ? 'https://openlibrary.org$key'
+            : null;
 
     return Book(
       key: key is String ? 'openlibrary:$key' : '',
@@ -158,10 +235,10 @@ class Book {
       title: rawTitle is String && rawTitle.trim().isNotEmpty
           ? rawTitle.trim()
           : 'Untitled book',
-      authors: rawAuthors is List
-          ? rawAuthors.whereType<String>().toList()
-          : const [],
-      coverId: cover is int ? cover : null,
+      authors: authors,
+      authorIdentifiers: authorIds,
+      sourceBookIds: keyValue == null ? const {} : {'Open Library': keyValue},
+      coverId: coverId,
       isbn: isbns is List && isbns.isNotEmpty && isbns.first is String
           ? isbns.first as String
           : null,
@@ -183,6 +260,16 @@ class Book {
           ? json['edition_count'] as int
           : null,
       recordUrl: key is String ? 'https://openlibrary.org$key' : null,
+      readingAvailability: ebookAccess is String && ebookAccess != 'no_ebook'
+          ? ebookAccess
+          : publicScan == true
+              ? 'public_scan'
+              : 'catalog_only',
+      borrowUrl: borrowUrl,
+      availableFormats: [
+        if (publicScan == true) 'Open Library scan',
+        if (ebookAccess == 'borrowable') 'Borrowable',
+      ],
     );
   }
 
@@ -202,12 +289,27 @@ class Book {
     final epubUrl = _safeGutenbergFormat(formats, const [
       'application/epub+zip',
     ]);
-    final cover = formats['image/jpeg'];
+    final pdfUrl = _safeGutenbergFormat(formats, const ['application/pdf']);
+    final htmlUrl = _safeGutenbergFormat(formats, const [
+      'text/html',
+      'text/html; charset=utf-8',
+    ]);
+    final coverValue = formats['image/jpeg'];
+    final coverUri =
+        coverValue is String ? Uri.tryParse(coverValue) : null;
     final rawTitle = json['title'];
+    final rawShelves = json['bookshelves'];
+    final rawDownloadCount = json['download_count'];
+
+    final openLibrarySubjects = <String>{
+      if (rawSubjects is List) ...rawSubjects.whereType<String>(),
+      if (rawShelves is List) ...rawShelves.whereType<String>(),
+    };
 
     return Book(
       key: id is int ? 'gutendex:$id' : '',
       source: 'Project Gutenberg',
+      sourceBookIds: id is int ? {'Project Gutenberg': '$id'} : const {},
       title: rawTitle is String && rawTitle.trim().isNotEmpty
           ? rawTitle.trim()
           : 'Untitled book',
@@ -218,17 +320,31 @@ class Book {
               .whereType<String>()
               .toList()
           : const [],
-      categories: rawSubjects is List
-          ? rawSubjects.whereType<String>().take(8).toList()
-          : const [],
+      categories: openLibrarySubjects.take(12).toList(),
       language: rawLanguages is List &&
               rawLanguages.isNotEmpty &&
               rawLanguages.first is String
           ? rawLanguages.first as String
           : null,
-      coverImageUrl: cover is String ? _https(cover) : null,
+      coverImageUrl: coverUri?.scheme == 'https' &&
+              (coverUri!.host == 'gutenberg.org' ||
+                  coverUri.host.endsWith('.gutenberg.org'))
+          ? coverUri.toString()
+          : null,
       plainTextUrl: textUrl,
       epubUrl: epubUrl,
+      pdfUrl: pdfUrl,
+      readingUrl: htmlUrl ?? textUrl,
+      readingAvailability: htmlUrl != null || textUrl != null || epubUrl != null
+          ? 'public_domain'
+          : 'metadata_only',
+      downloadCount: rawDownloadCount is int ? rawDownloadCount : null,
+      availableFormats: [
+        if (textUrl != null) 'Plain text',
+        if (epubUrl != null) 'EPUB',
+        if (pdfUrl != null) 'PDF',
+        if (htmlUrl != null) 'HTML',
+      ],
       recordUrl: id is int ? 'https://www.gutenberg.org/ebooks/$id' : null,
     );
   }
@@ -268,6 +384,7 @@ class Book {
     return Book(
       key: id is String ? 'archive:$id' : '',
       source: 'Internet Archive',
+      sourceBookIds: id is String ? {'Internet Archive': id} : const {},
       title: rawTitle is String && rawTitle.trim().isNotEmpty
           ? rawTitle.trim()
           : 'Untitled book',
@@ -319,6 +436,17 @@ class Book {
         publicationDate: json['publicationDate'] as String?,
         pageCount: json['pageCount'] as int?,
         readingFormat: json['readingFormat'] as String?,
+        averageRating: (json['averageRating'] as num?)?.toDouble(),
+        ratingsCount: json['ratingsCount'] as int?,
+        downloadCount: json['downloadCount'] as int?,
+        authorIdentifiers: _readStringMap(json['authorIdentifiers']),
+        sourceBookIds: _readStringMap(json['sourceBookIds']),
+        availableFormats: (json['availableFormats'] as List<dynamic>? ?? const [])
+            .whereType<String>()
+            .toList(),
+        readingUrl: json['readingUrl'] as String?,
+        readingAvailability: json['readingAvailability'] as String?,
+        borrowUrl: json['borrowUrl'] as String?,
       );
 
   Map<String, dynamic> toJson() => {
@@ -344,6 +472,15 @@ class Book {
         'publicationDate': publicationDate,
         'pageCount': pageCount,
         'readingFormat': readingFormat,
+        'averageRating': averageRating,
+        'ratingsCount': ratingsCount,
+        'downloadCount': downloadCount,
+        'authorIdentifiers': authorIdentifiers,
+        'sourceBookIds': sourceBookIds,
+        'availableFormats': availableFormats,
+        'readingUrl': readingUrl,
+        'readingAvailability': readingAvailability,
+        'borrowUrl': borrowUrl,
       };
 
   @override
@@ -369,8 +506,14 @@ class Book {
     return null;
   }
 
-  static String _https(String url) =>
-      url.replaceFirst(RegExp(r'^http:'), 'https:');
+  static Map<String, String> _readStringMap(Object? value) {
+    if (value is! Map) return const {};
+    return {
+      for (final entry in value.entries)
+        if (entry.key is String && entry.value is String)
+          entry.key as String: entry.value as String,
+    };
+  }
 
   static String _plainText(String html) {
     final text = html

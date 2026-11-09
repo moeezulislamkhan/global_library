@@ -97,6 +97,47 @@ class _ReaderScreenState extends State<ReaderScreen> {
     );
   }
 
+  String _availabilityLabel(String value) => switch (value) {
+        'full_view' => 'full view',
+        'preview' => 'publisher-limited preview',
+        'metadata_only' ||
+        'catalog_only' =>
+          'catalog information only; reading is not confirmed',
+        'public_domain' => 'public-domain reading copy available',
+        'public_scan' => 'public scan reported by the catalog',
+        'borrowable' => 'borrowing may be available; check provider terms',
+        'printdisabled' =>
+          'accessible ebook access may require an eligible account',
+        _ => value.replaceAll('_', ' '),
+      };
+
+  Future<void> _launchProviderUrl(
+    String value, {
+    String? successMessage,
+  }) async {
+    final uri = Uri.tryParse(value);
+    if (uri == null || uri.scheme != 'https') {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('The provider link is invalid.')),
+      );
+      return;
+    }
+    final launched = await launchUrl(
+      uri,
+      mode: LaunchMode.externalApplication,
+    );
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          launched
+              ? successMessage ?? 'Provider reading page opened.'
+              : 'Could not open the provider reading page.',
+        ),
+      ),
+    );
+  }
+
   Widget _downloadButton(AppProvider app, String format, String? sourceUrl) {
     if (sourceUrl == null) return const SizedBox.shrink();
     final matches = app.downloadedBooks.where(
@@ -106,61 +147,72 @@ class _ReaderScreenState extends State<ReaderScreen> {
     final downloading = app.isDownloading(widget.book, format);
     return Padding(
       padding: const EdgeInsets.only(top: 8),
-      child: OutlinedButton.icon(
-        onPressed: downloading
-            ? null
-            : download == null
-                ? () async {
-                    try {
-                      await app.downloadBook(widget.book, format);
-                      if (mounted) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(
-                            content: Text(
-                              '${format.toUpperCase()} saved for offline reading.',
-                            ),
-                          ),
-                        );
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          OutlinedButton.icon(
+            onPressed: downloading
+                ? null
+                : download == null
+                    ? () async {
+                        try {
+                          await app.downloadBook(widget.book, format);
+                          if (mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text(
+                                  '${format.toUpperCase()} saved for offline reading.',
+                                ),
+                              ),
+                            );
+                          }
+                        } on Exception catch (error) {
+                          if (mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                  content: Text('Download failed: $error')),
+                            );
+                          }
+                        }
                       }
-                    } on Exception catch (error) {
-                      if (mounted) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(content: Text('Download failed: $error')),
-                        );
-                      }
-                    }
-                  }
-                : () async {
-                    try {
-                      await app.deleteDownload(download);
-                    } on Exception catch (error) {
-                      if (mounted) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(
-                            content: Text('Could not delete download: $error'),
-                          ),
-                        );
-                      }
-                    }
-                  },
-        icon: downloading
-            ? const SizedBox(
-                width: 18,
-                height: 18,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              )
-            : Icon(
-                download == null
-                    ? Icons.download_for_offline_outlined
-                    : Icons.delete_outline_rounded,
-              ),
-        label: Text(
-          downloading
-              ? 'Downloading…'
-              : download == null
-                  ? 'Download ${format.toUpperCase()} for offline'
-                  : 'Remove downloaded ${format.toUpperCase()}',
-        ),
+                    : () async {
+                        try {
+                          await app.deleteDownload(download);
+                        } on Exception catch (error) {
+                          if (mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content:
+                                    Text('Could not delete download: $error'),
+                              ),
+                            );
+                          }
+                        }
+                      },
+            icon: downloading
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : Icon(
+                    download == null
+                        ? Icons.download_for_offline_outlined
+                        : Icons.delete_outline_rounded,
+                  ),
+            label: Text(
+              downloading
+                  ? 'Downloading…'
+                  : download == null
+                      ? 'Download ${format.toUpperCase()} for offline'
+                      : 'Remove downloaded ${format.toUpperCase()}',
+            ),
+          ),
+          if (downloading)
+            LinearProgressIndicator(
+              value: app.downloadProgress(widget.book, format),
+            ),
+        ],
       ),
     );
   }
@@ -294,12 +346,34 @@ class _ReaderScreenState extends State<ReaderScreen> {
                   _InfoChip(label: widget.book.publisher!),
                 if (widget.book.language != null)
                   _InfoChip(label: widget.book.language!),
+                if (widget.book.publicationDate != null)
+                  _InfoChip(label: widget.book.publicationDate!),
+                if (widget.book.averageRating != null)
+                  _InfoChip(
+                    label: '★ ${widget.book.averageRating!.toStringAsFixed(1)}'
+                        '${widget.book.ratingsCount == null ? '' : ' · ${widget.book.ratingsCount} ratings'}',
+                  ),
+                if (widget.book.downloadCount != null)
+                  _InfoChip(
+                    label: '${widget.book.downloadCount} public downloads',
+                  ),
                 for (final category in widget.book.categories.take(4))
                   _InfoChip(label: category),
+                for (final format in widget.book.availableFormats)
+                  _InfoChip(label: format),
                 if (savedPage != null)
                   _InfoChip(label: 'Saved at page $savedPage'),
               ],
             ),
+            if (widget.book.readingAvailability != null) ...[
+              const SizedBox(height: 12),
+              Text(
+                'Reading availability: '
+                '${_availabilityLabel(widget.book.readingAvailability!)}',
+                textAlign: TextAlign.center,
+                style: theme.textTheme.bodyMedium,
+              ),
+            ],
             const SizedBox(height: 26),
             Text(
               'Read in the app',
@@ -366,6 +440,28 @@ class _ReaderScreenState extends State<ReaderScreen> {
                 label: const Text('Read PDF in app'),
               ),
             ],
+            if (widget.book.borrowUrl case final borrowUrl?) ...[
+              const SizedBox(height: 8),
+              OutlinedButton.icon(
+                onPressed: () => _launchProviderUrl(
+                  borrowUrl,
+                  successMessage:
+                      'Open Library borrowing options opened in your browser.',
+                ),
+                icon: const Icon(Icons.menu_book_outlined),
+                label: const Text('Check Open Library borrowing access'),
+              ),
+            ],
+            if (widget.book.readingUrl case final readingUrl?
+                when readingUrl != widget.book.previewUrl &&
+                    readingUrl != widget.book.plainTextUrl) ...[
+              const SizedBox(height: 8),
+              OutlinedButton.icon(
+                onPressed: () => _launchProviderUrl(readingUrl),
+                icon: const Icon(Icons.open_in_browser_rounded),
+                label: const Text('Open authorized reading edition'),
+              ),
+            ],
             _downloadButton(app, 'epub', widget.book.epubUrl),
             _downloadButton(app, 'pdf', widget.book.pdfUrl),
             if (!widget.book.canReadInApp)
@@ -389,39 +485,39 @@ class _ReaderScreenState extends State<ReaderScreen> {
               )
             else
               ...app.bookmarksFor(widget.book).map(
-                (bookmark) => Card(
-                  child: ListTile(
-                    onTap: () => _openBookmark(bookmark),
-                    leading: const Icon(Icons.bookmark_outline_rounded),
-                    title: Text(bookmark.name),
-                    subtitle: Text(
-                      bookmark.location != null
-                          ? 'EPUB reading location'
-                          : 'Page ${bookmark.page ?? 1}',
-                    ),
-                    trailing: PopupMenuButton<String>(
-                      tooltip: 'Bookmark options',
-                      onSelected: (value) async {
-                        if (value == 'edit') {
-                          await _editBookmark(bookmark);
-                        } else if (value == 'delete') {
-                          await app.deleteBookmark(bookmark);
-                        }
-                      },
-                      itemBuilder: (context) => const [
-                        PopupMenuItem(
-                          value: 'edit',
-                          child: Text('Edit name'),
+                    (bookmark) => Card(
+                      child: ListTile(
+                        onTap: () => _openBookmark(bookmark),
+                        leading: const Icon(Icons.bookmark_outline_rounded),
+                        title: Text(bookmark.name),
+                        subtitle: Text(
+                          bookmark.location != null
+                              ? 'EPUB reading location'
+                              : 'Page ${bookmark.page ?? 1}',
                         ),
-                        PopupMenuItem(
-                          value: 'delete',
-                          child: Text('Delete bookmark'),
+                        trailing: PopupMenuButton<String>(
+                          tooltip: 'Bookmark options',
+                          onSelected: (value) async {
+                            if (value == 'edit') {
+                              await _editBookmark(bookmark);
+                            } else if (value == 'delete') {
+                              await app.deleteBookmark(bookmark);
+                            }
+                          },
+                          itemBuilder: (context) => const [
+                            PopupMenuItem(
+                              value: 'edit',
+                              child: Text('Edit name'),
+                            ),
+                            PopupMenuItem(
+                              value: 'delete',
+                              child: Text('Delete bookmark'),
+                            ),
+                          ],
                         ),
-                      ],
+                      ),
                     ),
                   ),
-                ),
-              ),
             const SizedBox(height: 24),
             Text(
               'Recommended books',

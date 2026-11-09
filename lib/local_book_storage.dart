@@ -18,7 +18,11 @@ class LocalBookStorage {
   final http.Client _client;
   final Future<Directory> Function() _documentsDirectory;
 
-  Future<File> download(Book book, String format) async {
+  Future<File> download(
+    Book book,
+    String format, {
+    void Function(int receivedBytes, int? totalBytes)? onProgress,
+  }) async {
     final url = format == 'epub' ? book.epubUrl : book.pdfUrl;
     final uri = url == null ? null : Uri.tryParse(url);
     if (!_isAuthorizedSource(uri)) {
@@ -75,6 +79,7 @@ class LocalBookStorage {
             );
           }
           sink.add(chunk);
+          onProgress?.call(downloadedBytes, response.contentLength);
         }
         await sink.flush();
       } finally {

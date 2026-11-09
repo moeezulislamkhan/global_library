@@ -35,6 +35,7 @@ class AppProvider extends ChangeNotifier {
   final LocalLibraryDatabase _database;
   final LocalBookStorage _bookStorage;
   final Set<String> _downloadsInProgress = {};
+  final Map<String, double?> _downloadProgress = {};
   SharedPreferences? _prefs;
   Timer? _debounce;
 
@@ -53,6 +54,7 @@ class AppProvider extends ChangeNotifier {
   List<String> _sourceWarnings = [];
   String _query = '';
   bool _isDark = false;
+  BookSearchType _searchType = BookSearchType.keyword;
   int _nextPage = 1;
   int _searchGeneration = 0;
 
@@ -69,6 +71,7 @@ class AppProvider extends ChangeNotifier {
   List<String> get sourceWarnings => List.unmodifiable(_sourceWarnings);
   String get query => _query;
   bool get isDark => _isDark;
+  BookSearchType get searchType => _searchType;
   ThemeMode get themeMode => _isDark ? ThemeMode.dark : ThemeMode.light;
 
   Future<List<Book>> getRecommendations(Book book) =>
@@ -407,12 +410,16 @@ class AppProvider extends ChangeNotifier {
   bool isDownloading(Book book, String format) =>
       _downloadsInProgress.contains('${book.key}:$format');
 
+  double? downloadProgress(Book book, String format) =>
+      _downloadProgress['${book.key}:$format'];
+
   Future<void> downloadBook(Book book, String format) async {
     if (format != 'epub' && format != 'pdf') {
       throw ArgumentError.value(format, 'format', 'Expected epub or pdf.');
     }
     final key = '${book.key}:$format';
     if (!_downloadsInProgress.add(key)) return;
+    _downloadProgress[key] = null;
     notifyListeners();
     File? downloadedFile;
     try {
@@ -420,7 +427,15 @@ class AppProvider extends ChangeNotifier {
       if (existing != null && await File(existing.localPath).exists()) return;
 
       await _database.markDownloadStatus(book, format, 'downloading');
-      downloadedFile = await _bookStorage.download(book, format);
+      downloadedFile = await _bookStorage.download(
+        book,
+        format,
+        onProgress: (received, total) {
+          if (total == null || total <= 0) return;
+          _downloadProgress[key] = (received / total).clamp(0.0, 1.0);
+          notifyListeners();
+        },
+      );
       final size = await downloadedFile.length();
       await _database.saveDownload(
         book,
@@ -437,6 +452,7 @@ class AppProvider extends ChangeNotifier {
       rethrow;
     } finally {
       _downloadsInProgress.remove(key);
+      _downloadProgress.remove(key);
       notifyListeners();
     }
   }
@@ -489,7 +505,12 @@ class AppProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> search(String value, {bool immediate = false}) async {
+  Future<void> search(
+    String value, {
+    bool immediate = false,
+    BookSearchType? type,
+  }) async {
+    if (type != null) _searchType = type;
     _query = value;
     final generation = ++_searchGeneration;
     _debounce?.cancel();
@@ -507,7 +528,7 @@ class AppProvider extends ChangeNotifier {
 
     if (!immediate) {
       _debounce = Timer(const Duration(milliseconds: 450), () {
-        _performSearch(value, generation: generation);
+        _performSearch(value, generation: generation, type: _searchType);
       });
       _results = [];
       _sourceWarnings = [];
@@ -516,12 +537,13 @@ class AppProvider extends ChangeNotifier {
       notifyListeners();
       return;
     }
-    await _performSearch(value, generation: generation);
+    await _performSearch(value, generation: generation, type: _searchType);
   }
 
   Future<void> _performSearch(
     String value, {
     required int generation,
+    required BookSearchType type,
     bool append = false,
   }) async {
     final requestedQuery = value.trim();
@@ -537,12 +559,19 @@ class AppProvider extends ChangeNotifier {
     notifyListeners();
 
     try {
+      final page = append ? _nextPage : 1;
       final result = await _repository.searchBooks(
         requestedQuery,
-        page: append ? _nextPage : 1,
+        page: page,
+        type: type,
       );
       if (generation == _searchGeneration &&
           _query.trim() == requestedQuery) {
+        await _database.cacheSearchPage(
+          _repository.searchCacheKey(requestedQuery, type),
+          page,
+          result.books,
+        );
         _results = append
             ? _repository.mergePages(_results, result.books)
             : result.books;
@@ -553,8 +582,22 @@ class AppProvider extends ChangeNotifier {
     } catch (error) {
       if (generation == _searchGeneration &&
           _query.trim() == requestedQuery) {
-        _error = error.toString().replaceFirst('Exception: ', '');
-        if (!append) _results = [];
+        final cached = await _database.getCachedSearchPage(
+          _repository.searchCacheKey(requestedQuery, type),
+          append ? _nextPage : 1,
+        );
+        if (cached.isNotEmpty) {
+          _results = append
+              ? _repository.mergePages(_results, cached)
+              : cached;
+          _sourceWarnings = [
+            'Catalog services are unavailable; showing locally cached results.',
+          ];
+          _error = null;
+        } else {
+          _error = error.toString().replaceFirst('Exception: ', '');
+          if (!append) _results = [];
+        }
       }
     } finally {
       if (generation == _searchGeneration &&
@@ -573,6 +616,7 @@ class AppProvider extends ChangeNotifier {
     await _performSearch(
       _query,
       generation: _searchGeneration,
+      type: _searchType,
       append: true,
     );
   }
